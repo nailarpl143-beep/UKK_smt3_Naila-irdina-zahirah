@@ -1,6 +1,5 @@
 
 import { NextResponse } from "next/server"
-import { getAuthenticatedUser } from "@/lib/auth"
 import { prisma } from "@/lib/prisma"
 import { createUserJwt, hashUserPassword } from "@/lib/user-security"
 
@@ -15,7 +14,7 @@ const userFields = {
   token: true,
 } as const
 
-function isDuplicateEmail(error: unknown) {
+function isDuplicateError(error: unknown) {
   return (
     typeof error === "object" &&
     error !== null &&
@@ -52,6 +51,7 @@ async function generateKodeUser(role: string) {
   return prefix + String(number).padStart(6, "0")
 }
 
+// GET DATA USER DAN PREVIEW KODE USER
 export async function GET(request: Request) {
   // if (!await getAuthenticatedUser()) {
   //   return NextResponse.json(
@@ -61,10 +61,31 @@ export async function GET(request: Request) {
   // }
 
   const searchParams = new URL(request.url).searchParams
+
+  // Jika ada parameter role, kembalikan kode berikutnya
+  const role = searchParams.get("role")
+
+  if (role === "admin" || role === "staff") {
+    try {
+      const kodeUser = await generateKodeUser(role)
+
+      return NextResponse.json({ kodeUser })
+    } catch (error) {
+      console.error("Failed to generate kode user:", error)
+
+      return NextResponse.json(
+        { error: "Gagal mengambil kode user." },
+        { status: 500 }
+      )
+    }
+  }
+
+  // Jika tidak ada parameter role, tampilkan daftar user
   const requestedPage = Number.parseInt(
     searchParams.get("page") ?? "1",
     10
   )
+
   const requestedPageSize = Number.parseInt(
     searchParams.get("pageSize") ?? "10",
     10
@@ -107,6 +128,7 @@ export async function GET(request: Request) {
   }
 }
 
+// TAMBAH USER
 export async function POST(request: Request) {
   // if (!await getAuthenticatedUser()) {
   //   return NextResponse.json(
@@ -126,11 +148,16 @@ export async function POST(request: Request) {
     )
   }
 
+  const kodeUser =
+    typeof body.kodeUser === "string" ? body.kodeUser.trim() : ""
+
   const fullname =
     typeof body.fullname === "string" ? body.fullname.trim() : ""
 
   const email =
-    typeof body.email === "string" ? body.email.trim().toLowerCase() : ""
+    typeof body.email === "string"
+      ? body.email.trim().toLowerCase()
+      : ""
 
   const password =
     typeof body.password === "string" ? body.password : ""
@@ -138,6 +165,7 @@ export async function POST(request: Request) {
   const role =
     typeof body.role === "string" ? body.role : "staff"
 
+  // Validasi nama dan email
   if (
     !fullname ||
     fullname.length > 191 ||
@@ -150,6 +178,7 @@ export async function POST(request: Request) {
     )
   }
 
+  // Validasi password
   if (password.length < 8) {
     return NextResponse.json(
       { error: "Password minimal 8 karakter." },
@@ -157,9 +186,23 @@ export async function POST(request: Request) {
     )
   }
 
+  // Validasi role
   if (role !== "admin" && role !== "staff") {
     return NextResponse.json(
       { error: "Role tidak valid." },
+      { status: 400 }
+    )
+  }
+
+  // Validasi kode sesuai role
+  const prefix = role === "admin" ? "ADM" : "STF"
+
+  if (
+    !kodeUser.startsWith(prefix) ||
+    !/^\d{6}$/.test(kodeUser.slice(prefix.length))
+  ) {
+    return NextResponse.json(
+      { error: "Format kode user tidak valid." },
       { status: 400 }
     )
   }
@@ -172,9 +215,25 @@ export async function POST(request: Request) {
   }
 
   try {
-    const kodeUser = await generateKodeUser(role)
+    // Pastikan kode belum digunakan
+    const existingKode = await prisma.user.findUnique({
+      where: { kodeUser },
+      select: { id: true },
+    })
+
+    if (existingKode) {
+      return NextResponse.json(
+        {
+          error:
+            "Kode user sudah digunakan. Muat ulang kode terlebih dahulu.",
+        },
+        { status: 409 }
+      )
+    }
+
     const passwordHash = await hashUserPassword(password)
 
+    // Simpan kode persis seperti yang dikirim dari input
     const user = await prisma.$transaction(async (transaction) => {
       const created = await transaction.user.create({
         data: {
@@ -207,9 +266,11 @@ export async function POST(request: Request) {
       { status: 201 }
     )
   } catch (error) {
-    if (isDuplicateEmail(error)) {
+    if (isDuplicateError(error)) {
       return NextResponse.json(
-        { error: "Email sudah digunakan." },
+        {
+          error: "Email atau kode user sudah digunakan.",
+        },
         { status: 409 }
       )
     }
